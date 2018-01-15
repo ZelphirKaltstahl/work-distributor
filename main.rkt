@@ -175,6 +175,11 @@ The group has been indispensable to help me understanding how places in Racket w
 
   (stop-places places))
 
-;; Is this module* thing required?
+;; Is this module* thing required? –
+;; Yes, because places are lifted.
+;; This means each place would in its own Racket instance see a plain (main ...) call and run that,
+;; if the call was not inside a submodule.
+;; This would lead to an endless loop with each new place calling (main ...) again,
+;; creating more places.
 (module* main #f
   (main (processor-count)))
