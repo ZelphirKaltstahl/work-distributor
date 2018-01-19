@@ -1,11 +1,11 @@
 #lang racket
 
 #|
-Note:
+About this code:
   This code is mostly adapted from code given as examples by the people from the Racket user group.
   The group has been indispensable to help me understanding how places in Racket work and how to use them.
 
-Issues:
+Issues of this implementation:
   (1)
   This implementation assumes that a channel will finish without failure.
   A failure might lead to hanging of the implementation.
@@ -20,7 +20,7 @@ Issues:
   to signal that there is no further work, for each place one such message,
   so that they stop looking for more work.
 
-Idea:
+Improvement ideas:
   The terminate channel might be redundant, if we define a message protocol,
   which interprets messages, that signal that there is no more work to distribute to any place.
 |#
