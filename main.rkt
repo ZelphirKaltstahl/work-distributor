@@ -201,7 +201,9 @@ Idea:
                ['finished (loop (add1 done) results)]
                ;; Anything else will be considered a result.
                [(list 'result place-id single-result) (loop done (cons single-result results))]
-               [anything-else (place-output out-channel "letting places finish")
+               [anything-else (place-output out-channel
+                                            "message from child place not understood: ~a"
+                                            anything-else)
                               (loop done results)]))]
           [else results])))
 
