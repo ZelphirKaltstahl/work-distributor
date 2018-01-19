@@ -6,8 +6,19 @@ Note:
   The group has been indispensable to help me understanding how places in Racket work and how to use them.
 
 Issues:
+  (1)
   This implementation assumes that a channel will finish without failure.
   A failure might lead to hanging of the implementation.
+
+  (2)
+  Unlikely case, but we are talking about concurrency here ...:
+  What if the places grab work from the channel faster than the main place
+  can put work on the channel. Wont they think they are already done?
+
+  Solution idea:
+  Let the main place put a message on the receive-work/send-results-channel
+  to signal that there is no further work, for each place one such message,
+  so that they stop looking for more work.
 
 Idea:
   The terminate channel might be redundant, if we define a message protocol,
@@ -178,7 +189,7 @@ Idea:
 
 ;; Note: This could be seen as the main place's message protocol.
 ;; Maybe the naming should reflect that.
-(define (retrieve-results places# receive-results-channel)
+(define (retrieve-results places# receive-results-channel out-channel)
   (let loop ([done 0]
              [results '()])
     (cond [(< done places#)
@@ -189,7 +200,9 @@ Idea:
                ;;          or otherwise fails to put such message on the channel?
                ['finished (loop (add1 done) results)]
                ;; Anything else will be considered a result.
-               [anything-else (loop done (cons single-result results))]))]
+               [(list 'result place-id single-result) (loop done (cons single-result results))]
+               [anything-else (place-output out-channel "letting places finish")
+                              (loop done results)]))]
           [else results])))
 
 (define (put-work-on-channel work send-work-pch)
@@ -210,14 +223,14 @@ Idea:
 
   ;; Make an out channel which has a counterpart which is printed in another thread.
   ;; Messages going in this out channel will result in messages coming out the counterpart channel.
-  (define out-ch (make-out-channel))
+  (define out-channel (make-out-channel))
 
   ;; Create the places and let them know the `get-work-pch`,
   ;; so that they know where to get more work form.
   ;; Also let them output anything to this place's outbount channel. (Why?)
   (define places (start-n-places places#
                                  receive-work/send-results-channel
-                                 out-ch))
+                                 out-channel))
 
   ;; Sleep for a short time to let places initialize.
   ;; (TODO: not sure this is required)
@@ -227,23 +240,25 @@ Idea:
   (for ([message messages])
     (place-channel-put send-work/receive-results-channel message))
 
-  (place-output out-ch "main has no more work data")
+  (place-output out-channel "main has no more work data")
 
   ;; We listen on the `send-work-pch` because it is the counterpart of the `get-work-pch`,
   ;; on which the child places will put results.
   ;; TODO: IDEA: Last message from place is a work done message and
   ;; we count work done = places as condition for all work to be finished.
 
-  (place-output out-ch "letting places finish")
+  (place-output out-channel "letting places finish")
   (stop-places places)
-  (place-output out-ch "places stopped")
+  (place-output out-channel "places stopped")
 
-  (place-output out-ch "collecting results ...")
+  (place-output out-channel "collecting results ...")
   (define results
-    (retrieve-results places# send-work/receive-results-channel))
-  (place-output out-ch "all work results collected")
+    (retrieve-results places#
+                      send-work/receive-results-channel
+                      out-channel))
+  (place-output out-channel "all work results collected")
 
-  (place-output out-ch "The results are ~s." results)
+  (place-output out-channel "The results are ~s." results)
   results)
 
 ;; Is this module* thing required? –
