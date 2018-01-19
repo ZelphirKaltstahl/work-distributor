@@ -234,7 +234,7 @@ Idea:
   ;; TODO: IDEA: Last message from place is a work done message and
   ;; we count work done = places as condition for all work to be finished.
 
-  (place-output out-ch "stopping places")
+  (place-output out-ch "letting places finish")
   (stop-places places)
   (place-output out-ch "places stopped")
 
