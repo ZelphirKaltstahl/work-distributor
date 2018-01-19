@@ -1,13 +1,22 @@
 #lang racket
 
 #|
-This code is mostly adapted from code given as examples by the people from the Racket user group.
-The group has been indispensable to help me understanding how places in Racket work and how to use them.
+Note:
+  This code is mostly adapted from code given as examples by the people from the Racket user group.
+  The group has been indispensable to help me understanding how places in Racket work and how to use them.
+
+Issues:
+  This implementation assumes that a channel will finish without failure.
+  A failure might lead to hanging of the implementation.
+
+Idea:
+  The terminate channel might be redundant, if we define a message protocol,
+  which interprets messages, that signal that there is no more work to distribute to any place.
 |#
 
 ;; outputs stuff on a channel rather than stdout stdin and stderr or other ports
 ;; This is used by child places to put things on the `out-ch` made by calling
-;; (make-out-ch ...).
+;; (make-out-channel ...).
 (define (place-output out-ch . args)
   (place-channel-put out-ch args))
 
@@ -20,7 +29,7 @@ The group has been indispensable to help me understanding how places in Racket w
 ;; When that happens the (sync in-ch) running in the thread will notice,
 ;; that the event represented by the channel `in-ch` is ready and
 ;; will use that as something to `printf`.
-(define (make-out-ch)
+(define (make-out-channel)
   (define-values (in-ch out-ch)
     (place-channel))
   (thread (λ ()
@@ -35,8 +44,63 @@ The group has been indispensable to help me understanding how places in Racket w
 
 
 ;; The message handling protocol defined how the child places will react on messages.
-(define (message-handling-protocol place-id get-work-channel terminate-channel out-channel)
-  ;; Immediately enter the loop.
+(define (message-handling-protocol place-id
+                                   receive-work/send-results-channel
+                                   terminate-channel
+                                   out-channel)
+  ;; Procedure which does work and returns the result of the work.
+  ;; It is called from within the message-handling-loop.
+  (define (do-work data)
+    ;; TODO: Do real work here.
+    ;; some busy work to be able to see how many cores are used
+    (for ([i (range 5000)])
+      (expt i (add1 i)))
+    (list 'result place-id data))
+
+  ;; This loop is run when the place receives a termination message on the terminate-channel.
+  (define (post-terminate-loop)
+
+    ;; If there is more work remaining do it, otherwise really terminate by exiting the loop,
+    ;; by not calling it again.
+    (let ([remaining-work-result
+           ;; This checks whether there is any work remaining by reacting on messages
+           ;; on the `receive-work/send-results-channel`.
+           ;; However, doing so requires waiting for a message.
+           ;; There is no `peek` operation for place-channels like the peek for a stack.
+           ;; Once it receives a message it needs to call `do-work` so that
+           ;; the message is processed.
+
+           ;; It could be that there is no remaining message.
+           ;; If the waiting for messages were blocking,
+           ;; this could cause the place to hang in an endless waiting state.
+           ;; This is why we `sync/timeout`.
+           ;; If there is a message remaining, do the work and return the result.
+
+           ;; Do another job if any are remaining, but don't block.
+           ;; sync/timeout with 0 as timeout is equal to timeout being (λ () #f).
+           ;; If no event is ready timeout is called in tail position.
+           ;; Synchronization result is determined by calling do-work with the work item.
+
+           ;; Issue(?):
+           ;; What if the places grab work from the channel faster than the main place
+           ;; can put work on the channel. Wont they think they are already done?
+
+           ;; Solution idea:
+           ;; Let the main place put a message on the receive-work/send-results-channel
+           ;; to signal that there is no further work, for each place one such message,
+           ;; so that they stop looking for more work.
+           (sync/timeout 0 (wrap-evt receive-work/send-results-channel
+                                     do-work))])
+      (cond [remaining-work-result (place-channel-put receive-work/send-results-channel
+                                                      remaining-work-result)
+                                   (post-terminate-loop)]
+            [else (place-channel-put receive-work/send-results-channel
+                                     'finished)
+                  (place-output out-channel
+                                "Place ~s is going to finish now."
+                                place-id)])))
+
+  ;; Immediately enter the message-handling-loop when message-handling-protocol is called.
   (let message-handling-loop ()
     ;; as soon as one of the handled events is ready it is the result of sync
 
@@ -57,14 +121,16 @@ The group has been indispensable to help me understanding how places in Racket w
                       ;; However, we do not use the message. If we receive any
                       ;; message on `terminate-pch` we terminate by simply not
                       ;; calling the `message-handling-loop` any longer.
-                      (λ (_) (place-output out-channel
-                                           "Place ~s is going to finish now."
-                                           place-id)))
+                      (λ (_)
+                        (post-terminate-loop)
+                        (place-output out-channel
+                                      "Place ~s is going to finish now."
+                                      place-id)))
           ;; We have access to `get-work-pch` here, because we are using
           ;; `place/context` to create the place which allows us to use
           ;; "free lexical variables".
           ;; On the `get-work-pch` we will receive additional work to be done.
-          (handle-evt get-work-channel
+          (handle-evt receive-work/send-results-channel
                       (λ (data)
                         ;; In here one could do more to distinguish different types of messages.
                         ;; For example using pattern matching against `data`.
@@ -73,29 +139,24 @@ The group has been indispensable to help me understanding how places in Racket w
                                       "Place ~s got the following work: ~a."
                                       place-id
                                       data)
-                        (place-channel-put get-work-channel (do-work place-id data))
+                        (place-channel-put receive-work/send-results-channel
+                                           (do-work data))
                         (message-handling-loop))))))
 
-(define (do-work place-id data)
-  ;; some busy work to be able to see how many cores are used
-  (for ([i (range 5000)])
-    (expt i (add1 i)))
-  (list 'result place-id data))
-
-(define (start-n-places n-places get-work-pch out-ch)
+(define (start-n-places n-places receive-work/send-results-channel out-ch)
   ;; Start as many places, as we have processing units.
   (for/list ([place-id n-places])
     (define a-place
-      ;; `terminate-pch` is a place channel, on which we can send a message to the place.
+      ;; `terminate-channel` is a place channel, on which we can send a message to the place.
       ;; Inside this place all top-level bindings of the enclosing module
-      ;; and the `terminate-pch` are visible.
-      (place/context terminate-pch
+      ;; and the `terminate-channel` are visible.
+      (place/context terminate-channel
                      (place-output out-ch "place starting")
                      ;; protocol for message processing
                      ;; internally runs the message-processing-loop
                      (message-handling-protocol place-id
-                                                get-work-pch
-                                                terminate-pch
+                                                receive-work/send-results-channel
+                                                terminate-channel
                                                 out-ch)))
     ;; When the place is created let us know about it by putting a message on the channel.
     (place-output out-ch "created place ~s" place-id)
@@ -115,21 +176,21 @@ The group has been indispensable to help me understanding how places in Racket w
   (for ([a-place (in-list places)])
     (place-wait a-place)))
 
-
-(define (retrieve-n-results-from-channel send-work-pch num-messages)
+;; Note: This could be seen as the main place's message protocol.
+;; Maybe the naming should reflect that.
+(define (retrieve-results places# receive-results-channel)
   (let loop ([done 0]
              [results '()])
-    #;(place-output out-ch "current results: ~a" results)
-    ;; The whole computation is only finished,
-    ;; if all messages resulted a message from the places.
-    (cond [(< done num-messages)
-           #;(place-output out-ch "message-counter: ~s" done)
-           (loop (add1 done)
-                 ;; collect work results
-                 (let ([single-result (sync send-work-pch)])
-                   (cons single-result results)))]
-          [else #;(place-output out-ch "results: ~s" results)
-                results])))
+    (cond [(< done places#)
+           (let ([single-result (sync receive-results-channel)])
+             (match single-result
+               ;; Places must send a 'finished message when they are done with all work!
+               ;; Warning: Here lies an issue: What if the place crashes,
+               ;;          or otherwise fails to put such message on the channel?
+               ['finished (loop (add1 done) results)]
+               ;; Anything else will be considered a result.
+               [anything-else (loop done (cons single-result results))]))]
+          [else results])))
 
 (define (put-work-on-channel work send-work-pch)
   (for/fold ([n 0])  ; accumulate in n
@@ -137,43 +198,53 @@ The group has been indispensable to help me understanding how places in Racket w
     (place-channel-put send-work-pch message)
     (add1 n)))
 
-(define (main n-places [messages '(the quick brown fox jumped over the lazy dogs)])
+(define (main places# [messages (range 50)#;'(the quick brown fox jumped over the lazy dogs)])
   ;; This must not be at the module level, or each place will get its own version.
   ;; (Why would that happen? – Because the places would see the top-level module bindings,
   ;; because they are lifted to top-level and they do not share any data.
-  ;; This means they would each get these values in their own Racket instance.)
+  ;; This means they would each get values in their respective Racket instance.)
   ;; These channels are the channels through which we will put work to the child places and
   ;; receive the results from the places.
-  (define-values (send-work-pch get-work-pch)
+  (define-values (send-work/receive-results-channel receive-work/send-results-channel)
     (place-channel))
 
   ;; Make an out channel which has a counterpart which is printed in another thread.
   ;; Messages going in this out channel will result in messages coming out the counterpart channel.
-  (define out-ch (make-out-ch))
+  (define out-ch (make-out-channel))
 
   ;; Create the places and let them know the `get-work-pch`,
   ;; so that they know where to get more work form.
   ;; Also let them output anything to this place's outbount channel. (Why?)
-  (define places (start-n-places n-places get-work-pch out-ch))
+  (define places (start-n-places places#
+                                 receive-work/send-results-channel
+                                 out-ch))
 
-  ;; Give the places some time to start up.
+  ;; Sleep for a short time to let places initialize.
+  ;; (TODO: not sure this is required)
   (sleep 1)
 
-  ;; Count sent messages which are put on the `send-work-pch`.
-  (define num-messages
-    (put-work-on-channel messages send-work-pch))
+  ;; Put all messages on the channel for the places to grab them and do their work.
+  (for ([message messages])
+    (place-channel-put send-work/receive-results-channel message))
 
   (place-output out-ch "main has no more work data")
 
   ;; We listen on the `send-work-pch` because it is the counterpart of the `get-work-pch`,
   ;; on which the child places will put results.
+  ;; TODO: IDEA: Last message from place is a work done message and
+  ;; we count work done = places as condition for all work to be finished.
+
+  (place-output out-ch "stopping places")
+  (stop-places places)
+  (place-output out-ch "places stopped")
+
+  (place-output out-ch "collecting results ...")
   (define results
-    (retrieve-n-results-from-channel send-work-pch num-messages))
+    (retrieve-results places# send-work/receive-results-channel))
+  (place-output out-ch "all work results collected")
 
-  (place-output out-ch "all work reports finished")
   (place-output out-ch "The results are ~s." results)
-
-  (stop-places places))
+  results)
 
 ;; Is this module* thing required? –
 ;; Yes, because places are lifted.
