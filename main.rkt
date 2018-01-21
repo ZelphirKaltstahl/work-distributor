@@ -10,6 +10,9 @@ Issues of this implementation:
   This implementation assumes that a channel will finish without failure.
   A failure might lead to hanging of the implementation.
 
+  Solution idea:
+  - "I am alive" kind of signals and stops if some place does not send them every now and then.
+
   (2)
   Unlikely case, but we are talking about concurrency here ...:
   What if the places grab work from the channel faster than the main place
@@ -19,6 +22,10 @@ Issues of this implementation:
   Let the main place put a message on the receive-work/send-results-channel
   to signal that there is no further work, for each place one such message,
   so that they stop looking for more work.
+
+  (3)
+  How to make the program really end in REPL?
+  What is blocking it / halting it?
 
 Improvement ideas:
   The terminate channel might be redundant, if we define a message protocol,
@@ -189,11 +196,13 @@ Improvement ideas:
 
 ;; Note: This could be seen as the main place's message protocol.
 ;; Maybe the naming should reflect that.
-(define (retrieve-results places# receive-results-channel out-channel)
+(define (retrieve-results places receive-results-channel out-channel)
+  (define places# (length places))
   (let loop ([done 0]
              [results '()])
     (cond [(< done places#)
            (let ([single-result (sync receive-results-channel)])
+             (place-output out-channel "finished places: ~s" done)
              (match single-result
                ;; Places must send a 'finished message when they are done with all work!
                ;; Warning: Here lies an issue: What if the place crashes,
@@ -252,15 +261,14 @@ Improvement ideas:
   (place-output out-channel "letting places finish")
   (stop-places places)
   (place-output out-channel "places stopped")
-
   (place-output out-channel "collecting results ...")
   (define results
-    (retrieve-results places#
+    (retrieve-results places
                       send-work/receive-results-channel
                       out-channel))
   (place-output out-channel "all work results collected")
-
   (place-output out-channel "The results are ~s." results)
+
   results)
 
 ;; Is this module* thing required? –
